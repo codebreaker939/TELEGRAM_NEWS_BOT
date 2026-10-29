@@ -26,6 +26,11 @@ class MITNewsAdapter:
     display_name = "MIT News"
     website_url = "https://news.mit.edu"
     category = "artificial-intelligence"
+    enabled = True
+
+    @property
+    def unavailable_reason(self) -> str | None:
+        return None
 
     def __init__(
         self,
@@ -55,8 +60,11 @@ class MITNewsAdapter:
                 await client.aclose()
 
         parsed_feed = await asyncio.to_thread(feedparser.parse, feed_bytes)
-        if parsed_feed.bozo and not parsed_feed.entries:
-            raise ProviderUnavailableError(f"MIT News returned an invalid RSS feed: {parsed_feed.bozo_exception}")
+        if (parsed_feed.bozo and not parsed_feed.entries) or not parsed_feed.version:
+            raise ProviderUnavailableError(
+                f"MIT News returned an invalid RSS feed: "
+                f"{parsed_feed.get('bozo_exception', 'missing RSS version')}"
+            )
 
         articles: list[RawArticle] = []
         for entry in parsed_feed.entries:

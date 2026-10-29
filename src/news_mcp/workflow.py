@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Protocol, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -17,6 +17,8 @@ class NewsProvider(Protocol):
     source_id: str
     display_name: str
     website_url: str
+    enabled: bool
+    unavailable_reason: str | None
 
     async def fetch(self) -> list[RawArticle]: ...
 
@@ -42,7 +44,11 @@ class IngestionService:
         await self.archive.initialize()
         for provider in self.providers.values():
             await self.archive.register_source(
-                provider.source_id, provider.display_name, provider.website_url
+                provider.source_id,
+                provider.display_name,
+                provider.website_url,
+                enabled=provider.enabled,
+                unavailable_reason=provider.unavailable_reason,
             )
 
     async def list_sources(self) -> list[dict[str, object]]:
@@ -66,9 +72,70 @@ class IngestionService:
             raise ValueError(f"Unknown source: {source}")
         return await self.archive.get_latest(source=source, category=category, limit=limit)
 
+    async def search(
+        self,
+        query: str,
+        *,
+        source: str | None = None,
+        from_date: str | None = None,
+        to_date: str | None = None,
+        limit: int = 10,
+    ) -> list[NewsArticle]:
+        await self.initialize()
+        self._validate_limit(limit)
+        self._validate_source(source)
+        start = self._parse_date(from_date, "from_date") if from_date else None
+        end = self._parse_date(to_date, "to_date") if to_date else None
+        if start and end and start > end:
+            raise ValueError("from_date must be on or before to_date")
+        return await self.archive.search(
+            query, source=source, from_date=start, to_date=end, limit=limit
+        )
+
+    async def get_article(self, article_id: str) -> NewsArticle | None:
+        await self.initialize()
+        return await self.archive.get_article(article_id)
+
+    async def get_related_articles(self, article_id: str) -> list[dict[str, object]]:
+        await self.initialize()
+        return await self.archive.get_related_articles(article_id)
+
+    async def get_by_date(
+        self, day: str, *, source: str | None = None, limit: int = 100
+    ) -> list[NewsArticle]:
+        await self.initialize()
+        self._validate_limit(limit)
+        self._validate_source(source)
+        return await self.archive.get_by_date(self._parse_date(day, "date"), source=source, limit=limit)
+
+    async def get_digest_candidates(self, day: str, *, limit: int = 10) -> list[NewsArticle]:
+        await self.initialize()
+        self._validate_limit(limit)
+        return await self.archive.get_digest_candidates(self._parse_date(day, "date"), limit=limit)
+
     async def _refresh_one(self, source: str) -> dict[str, object]:
         attempt_id = str(uuid.uuid4())
         await self.archive.start_attempt(attempt_id, source, datetime.now(UTC))
+        provider = self.providers[source]
+        if not provider.enabled:
+            reason = provider.unavailable_reason or "Source is disabled"
+            await self.archive.finish_attempt(
+                attempt_id,
+                source,
+                status="skipped",
+                fetched_count=0,
+                persisted_count=0,
+                duplicate_count=0,
+                error_message=reason,
+            )
+            return {
+                "source": source,
+                "status": "skipped",
+                "fetched_count": 0,
+                "persisted_count": 0,
+                "duplicate_count": 0,
+                "error": reason,
+            }
         initial_state: IngestionState = {
             "source": source,
             "attempt_id": attempt_id,
@@ -111,6 +178,22 @@ class IngestionService:
             "duplicate_count": result["duplicate_count"],
             "error": result["error"],
         }
+
+    def _validate_source(self, source: str | None) -> None:
+        if source and source not in self.providers:
+            raise ValueError(f"Unknown source: {source}")
+
+    @staticmethod
+    def _validate_limit(limit: int) -> None:
+        if limit < 1 or limit > 100:
+            raise ValueError("limit must be between 1 and 100")
+
+    @staticmethod
+    def _parse_date(value: str, field_name: str) -> date:
+        try:
+            return date.fromisoformat(value)
+        except ValueError as exc:
+            raise ValueError(f"{field_name} must use YYYY-MM-DD") from exc
 
     def _build_graph(self):
         async def fetch(state: IngestionState) -> dict[str, object]:
