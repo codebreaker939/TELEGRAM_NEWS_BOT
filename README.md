@@ -15,7 +15,7 @@ An independent Python MCP server that collects trusted news, normalizes permitte
 - Source configuration/status and persisted ingestion history for all four required publishers.
 - URL deduplication and persisted potential cross-source duplicate candidates based on same-period title similarity.
 - Mocked provider, archive-query, and MCP-discovery tests.
-- Phase 2 Milestone 4 `news_bot` package: authorized `/start`, `/news`, `/digest`, and `/history`; grounded conversations; persistent memory; and a restart-aware 6:00 AM Asia/Kolkata digest job.
+- Phase 2 Milestone 5 `news_bot` package: authorized `/start`, `/help`, `/news`, `/refresh`, `/digest`, and `/history`; grounded conversations; persistent memory; restart-aware delivery claims; and a 6:00 AM Asia/Kolkata digest job.
 - Post-Milestone-4 web fallback: when a topic search returns no matching archived article, Groq built-in Browser Search provides a clearly labeled live-web answer.
 
 Milestone 4 adds `/refresh` for an authorized manual MCP provider refresh, selects recent undelivered articles, and schedules a daily digest at 6:00 AM Asia/Kolkata. It records each recipient/date claim and completed article-ID delivery to prevent normal restart duplicates. `/digest` runs the same refresh → select → send workflow for manual testing. The post-Milestone-4 fallback uses the configured Groq `openai/gpt-oss-20b` model's built-in Browser Search only after a matching MCP topic query is empty. The Guardian adapter needs `GUARDIAN_API_KEY` before it can fetch live content. The Batch tries publisher-provided public archive JSON-LD metadata first, then a tightly validated Google News RSS discovery fallback, and finally an optional subscription inbox. It never fetches newsletter issue pages or invents an RSS endpoint.
@@ -80,7 +80,7 @@ npx -y @modelcontextprotocol/inspector
 
 Connect the Inspector to `http://127.0.0.1:8000/mcp`, list tools, run `list_sources`, then run `refresh_news` with `{"source":"mit-news"}`. Finally, invoke `get_latest_news`.
 
-## Run the Telegram bot — Phase 2 Milestone 4
+## Run the Telegram bot — Phase 2
 
 Configure these values in `.env` before starting the bot:
 
@@ -115,6 +115,8 @@ The bot must run in a separate process from the MCP server. `/news` remains dete
 At startup the Telegram JobQueue schedules one job per digest recipient at 06:00 with an `Asia/Kolkata` timezone-aware time. `/refresh` invokes only MCP `refresh_news` and reports source counts. `/digest` invokes the same refresh → select → send → record workflow immediately for the requesting chat. Set `TELEGRAM_DIGEST_CHAT_IDS` explicitly in a multi-user deployment; if unset, the bot uses the union of authorized user and chat IDs. An always-on process with durable `data/` storage is required; a laptop that sleeps or stops cannot reliably deliver a 6 AM digest.
 
 The bot suppresses `httpx`/`httpcore` INFO logs because Telegram’s API URL contains the bot token. It retries Telegram bootstrap failures up to three times before exiting; a persistent timeout still requires network diagnosis. If a token is ever shown in a terminal, chat, commit, or screenshot, revoke it in `@BotFather`, replace it in `.env`, and restart the bot.
+
+For deployment, run the MCP server and bot as two independently supervised, always-on processes. Keep their `data/` directories on durable storage, configure absolute database paths when the service manager has a different working directory, and run exactly one polling bot process for a given token. The scheduler is intentionally in the bot process; if that process is stopped or the host sleeps at 06:00 Asia/Kolkata, no external scheduler will recover the missed send automatically.
 
 ## Test
 
@@ -167,12 +169,12 @@ Tests use mocked transports/clients; no live API key, Telegram token, or externa
 - This milestone supports only a single always-on MCP server instance; a later production deployment decision must provide persistent storage for its SQLite archive.
 - The Batch public archive can deny automated requests. A denied/invalid archive automatically falls through to Google News; Google items are stored only if their redirect ends at an official Batch issue URL. A valid but empty Google feed is recorded as a successful zero-article refresh (no new issue); transport/invalid-response failures are recorded as `failed` while the other sources continue.
 - The Batch inbox mode needs an actual subscribed newsletter, its exact sender address, and an IMAP app password. It stores email metadata/excerpts and the official issue URL only; it does not retrieve the linked newsletter page.
-- Phase 2 Milestone 1 has live-verified Telegram authentication, polling, authorized `/start`, and authorized `/news` delivery from the persisted MCP archive on the developer's Mac. The bot fails closed when no authorized user/chat configuration exists.
+- Phase 2 has developer-reported live verification of Telegram authentication, polling, authorized `/start`, `/news`, `/history`, and contextual follow-up delivery from the persisted MCP archive on macOS. The bot fails closed when no authorized user/chat configuration exists.
 - Daily delivery claims are stored before retrieval and marked `sent` only after Telegram accepts the message and ordered IDs are persisted. This prevents normal restart duplicates. As with any external API plus local database, a process crash after Telegram accepts a message but before SQLite commits is an unavoidable at-least-once edge case; the active claim lease reduces duplicate retries and is documented for operators.
 - The digest considers articles from the last 36 hours, excludes any article ID previously delivered to that recipient, and removes exact normalized-title duplicates. It is deterministic and does not invoke an LLM.
 - The agent's model context is bounded, but the checkpoint database itself grows until a future retention policy is added. Its read-only tool set cannot refresh providers; answers describe the stored archive rather than claim breaking/live coverage.
 - Browser Search sends the user's fallback question to Groq's server-side search service and is not the News MCP archive. Groq documents Browser Search as incompatible with API structured-output mode, so the bot enforces a readable Markdown structure and a visible coverage label rather than claiming schema-validated web output.
-- Milestone 3 mocked tests cover the Telegram → LangGraph → MCP-tool flow, checkpoint thread isolation, delivery-order persistence, and MCP-based historical rereads. Live Groq/MCPAdapter and SQLite-checkpointer verification remain pending installation of the newly declared dependencies in a network-enabled environment and a configured `GROQ_API_KEY`.
+- The automated suite covers the Telegram → LangGraph → MCP-tool path, default SQLite checkpoint reopening across a recreated agent instance, delivery-order persistence, and MCP-based historical rereads. A production Groq/MCPAdapter request and a successful scheduled 06:00 delivery must still be observed in the deployed environment.
 
 ## Phase 1 acceptance checklist
 
@@ -191,4 +193,4 @@ Phase 1 cannot be signed off as fully satisfying the original four-source ingest
 
 ## Planned boundaries
 
-Live MCP verification on the developer's Mac succeeded for MIT News, TechCrunch, and The Guardian. The Batch archive metadata and Google News discovery fallback currently do not yield a verifiable official issue URL, so it is accurately recorded as unavailable for that refresh without interrupting the other sources. Its optional subscription inbox remains available. Phase 2 Milestones 1–4 and the Groq Browser Search fallback extension are implemented. Production-readiness work remains Milestone 5.
+Live MCP verification on the developer's Mac succeeded for MIT News, TechCrunch, and The Guardian. The Batch archive metadata and Google News discovery fallback currently do not yield a verifiable official issue URL, so it is accurately recorded as unavailable for that refresh without interrupting the other sources. Its optional subscription inbox remains available. Phase 2 Milestones 1–5 and the Groq Browser Search fallback extension are implemented. Final deployment acceptance remains an operational exercise, not a code change.

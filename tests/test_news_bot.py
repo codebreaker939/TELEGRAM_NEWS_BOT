@@ -390,6 +390,32 @@ async def test_agent_uses_a_user_specific_checkpoint_thread(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_agent_reopens_sqlite_checkpoint_after_process_restart(tmp_path) -> None:
+    """The default runtime checkpointer must retain a chat thread across agent instances."""
+    settings = _settings(tmp_path)
+    first_model = _ToolCallingModel()
+    first_agent = McpNewsAgent(
+        settings,
+        model_factory=lambda _: first_model,
+        adapter_factory=lambda _: _FakeAdapter(),
+    )
+    await first_agent.answer("What is the first story?", thread_id="telegram:42:42")
+
+    restarted_model = _ToolCallingModel()
+    restarted_agent = McpNewsAgent(
+        settings,
+        model_factory=lambda _: restarted_model,
+        adapter_factory=lambda _: _FakeAdapter(),
+    )
+    await restarted_agent.answer("Explain it further", thread_id="telegram:42:42")
+
+    assert any(
+        getattr(message, "content", "") == "What is the first story?"
+        for message in restarted_model.seen_messages[0]
+    )
+
+
+@pytest.mark.asyncio
 async def test_delivery_store_preserves_order_and_isolates_chat_and_user(tmp_path) -> None:
     store = DeliveryStore(str(tmp_path / "deliveries.db"))
     await store.initialize()
@@ -508,6 +534,34 @@ async def test_refresh_command_uses_the_mcp_archive_client(tmp_path) -> None:
     assert archive.refreshed
     assert "News refresh completed:" in message.replies[-1]
     assert "mit-news: fetched 0, new 0, duplicates 0" in message.replies[-1]
+
+
+@pytest.mark.asyncio
+async def test_help_lists_only_implemented_commands(tmp_path) -> None:
+    settings = _settings(tmp_path)
+    archive = _ArchiveWithArticles()
+    deliveries = DeliveryStore(settings.database_path)
+    await deliveries.initialize()
+    handlers = NewsBotHandlers(
+        settings,
+        archive,
+        _CapturingAssistant(),
+        deliveries,
+        DailyDigestService(settings, archive, deliveries),
+    )
+    message = _FakeTelegramMessage("/help")
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=42),
+        effective_chat=SimpleNamespace(id=42),
+        effective_message=message,
+    )
+
+    await handlers.help(update, None)
+
+    assert "/news" in message.replies[-1]
+    assert "/refresh" in message.replies[-1]
+    assert "/digest" in message.replies[-1]
+    assert "/history" in message.replies[-1]
 
 
 class _DigestSender:

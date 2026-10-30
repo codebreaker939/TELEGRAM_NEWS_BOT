@@ -66,6 +66,14 @@ Groq Browser Search is an external, live source and therefore `AgentAnswer.cover
 
 The Telegram conversation handler logs the terminal exception type and root-cause message when an assistant request fails, while the user still receives only the generic availability response. This is intended for local diagnosis of MCP, Groq, or Browser Search failures and does not log credentials.
 
+### 2026-10-30 — Phase 2, Milestone 5: production-readiness pass
+
+Completed the final code-level production-readiness pass without changing the Phase 1 MCP server. `/help` now documents only implemented bot commands. The Telegram application now registers a global error handler that records unexpected update failures for operators while preserving the existing user-safe command and agent error messages. The daily JobQueue schedule was restored to the required `06:00` `Asia/Kolkata` after a manual test-time change had left it at 07:16.
+
+The automated suite now exercises the default `AsyncSqliteSaver` path, not only an injected in-memory saver: a conversation is written, a new `McpNewsAgent` instance is constructed against the same SQLite path, and the next request receives the original thread context. This verifies checkpoint persistence across the application-level restart boundary. No queue, broker, Docker configuration, or additional deployment framework was added; two supervised processes with durable SQLite files remain the intended minimal deployment shape.
+
+**Milestone 5 verification on 2026-10-30:** `PYTHONPATH=src .venv/bin/pytest -q` completed with **39 passed in 0.99s**. `PYTHONPATH=src .venv/bin/python -m compileall -q src tests` and `git diff --check` also passed. These are local automated checks using fake Telegram, MCP, and model boundaries; they do not claim a live Groq request or a real scheduled Telegram delivery.
+
 ## Architecture and responsibilities
 
 ```text
@@ -348,6 +356,6 @@ The Guardian key and TechCrunch RSS now have successful macOS live verification.
 
 ## Phase 2 status, blockers, and boundary
 
-Phase 2 Milestones 1–4 are authorized and implemented. Milestone 1 has live verification for startup, authorization, `/start`, and `/news` delivery through MCP. The developer has live-verified Milestone 3 `/history`, suggested follow-ups, and contextual follow-up answers. The post-Milestone-4 Browser Search extension has mocked fallback coverage only. Live Groq function calling, Browser Search, LangChain MCPAdapter discovery, SQLite checkpoint persistence, and a 06:00 scheduled delivery remain pending local end-to-end verification.
+Phase 2 Milestones 1–5 are implemented. The developer has live-verified bot startup, authorization, `/start`, `/news`, `/history`, and contextual follow-ups. Milestone 5 adds a default SQLite-checkpointer restart test, `/help`, safe global update-error logging, and restores the scheduler to exactly 06:00 Asia/Kolkata. The complete automated suite is the source of code-level verification.
 
-Milestone 5 has not started: production deployment, restart recovery exercises, operational monitoring, final security review, and end-to-end acceptance verification remain. Before production, resolve or explicitly accept the partially unmet Batch requirement, deploy both independent processes on always-on infrastructure with durable bot/MCP SQLite volumes, set explicit digest recipient IDs, and verify a controlled manual `/digest` before relying on the first scheduled send. The Telegram application must remain a separately deployed MCP client; it must not import provider adapters, query the Phase 1 database, or become the MCP server.
+Before relying on production delivery, deploy the MCP and Telegram processes under an always-on supervisor with durable, backed-up SQLite directories; configure explicit digest recipient IDs; rotate the Telegram token that was exposed in earlier terminal output; and observe a controlled `/digest` plus one actual 06:00 scheduled send. The scheduler records a normal `completed`/zero-article outcome without sending a Telegram message when the recipient/date was already completed or no eligible article exists; that state is not proof of a successful external delivery. Groq Browser Search and the LangChain MCPAdapter must be monitored through application logs in the deployed network because their external providers can rate-limit or fail. The Telegram application remains an independently deployed MCP client and must not import provider adapters, query the Phase 1 database, or become the MCP server. The original four-source objective remains partially unmet because The Batch has no verified permitted live acquisition path.

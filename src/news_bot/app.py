@@ -99,7 +99,22 @@ class NewsBotHandlers:
             update,
             "Welcome to the News Assistant. Use /news for the latest archived articles, "
             "/refresh to fetch current provider updates, /digest to test today's daily digest, "
-            "/history to see your most recent delivery, or ask a news question.",
+            "/history to see your most recent delivery, /help for command details, or ask a news question.",
+        )
+
+    async def help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        if not await self._authorized(update):
+            return
+        await self._reply(
+            update,
+            "Commands:\n"
+            "/news — latest stored News MCP articles\n"
+            "/refresh — fetch configured publisher updates through MCP\n"
+            "/digest — run today's digest workflow now\n"
+            "/history [YYYY-MM-DD] — show a saved delivery\n\n"
+            "You can also ask a news question. Archive answers are labeled separately from "
+            "Groq live-web fallback answers.",
         )
 
     async def news(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -456,7 +471,7 @@ def create_application(
         for chat_id in settings.scheduled_chat_ids:
             application.job_queue.run_daily(
                 scheduled_digest,
-                time=time(hour=7, minute=16, tzinfo=IST),
+                time=time(hour=6, minute=0, tzinfo=IST),
                 name=f"daily-digest:{chat_id}",
                 data=chat_id,
             )
@@ -475,12 +490,21 @@ def create_application(
         .build()
     )
     application.add_handler(CommandHandler("start", handlers.start))
+    application.add_handler(CommandHandler("help", handlers.help))
     application.add_handler(CommandHandler("news", handlers.news))
     application.add_handler(CommandHandler("refresh", handlers.refresh))
     application.add_handler(CommandHandler("digest", handlers.digest))
     application.add_handler(CommandHandler("history", handlers.history))
     application.add_handler(CallbackQueryHandler(handlers.callback, pattern=r"^(article|why|related):"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.conversation))
+
+    async def log_unhandled_update_error(
+        update: object, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        del update
+        logger.error("Unhandled Telegram update error", exc_info=context.error)
+
+    application.add_error_handler(log_unhandled_update_error)
     return application
 
 
