@@ -28,6 +28,14 @@ The Batch adapter now attempts public archive JSON-LD metadata before Google New
 
 The Batch adapter now differentiates a valid empty Google News feed from a provider error. An empty feed produces a successful refresh with `fetched_count=0`, `persisted_count=0`, and `duplicate_count=0`, meaning no currently discoverable publication. An HTTP/DNS/rate-limit/invalid-feed error remains a failed attempt. This preserves the distinction between no new weekly issue, an existing issue that deduplicates on refresh, and a source failure.
 
+### 2026-10-30 — Phase 2, Milestone 1: Telegram ↔ MCP connectivity
+
+Added the independent `news_bot` package. It exposes only authorized `/start` and `/news` Telegram commands. `/news` opens an official MCP SDK `Client` against the configured Streamable HTTP URL, discovers `get_latest_news`, invokes it, and formats only the structured persisted records returned by MCP. It does not import `news_mcp`, provider adapters, or Phase 1 SQLite tables.
+
+`python-telegram-bot` 22.x was added as the sole Milestone 1 dependency. Access fails closed when neither user IDs nor chat IDs are configured. A live Telegram call was not performed: dependency installation was blocked in the current execution environment by DNS, and no Telegram token was supplied.
+
+During subsequent developer live startup, Telegram `getMe`, `deleteWebhook`, and polling initialization returned HTTP 200. The initial INFO-level `httpx` log emitted a Bot API URL, which embeds the token; this was treated as credential exposure. `news_bot.app.main()` now suppresses `httpx` and `httpcore` INFO logs. It also sets the official `run_polling(bootstrap_retries=3)` option because the library defaults to zero bootstrap retries; transient `getMe` timeouts now get three retries, while a persistent failure still stops clearly. The token must be revoked and regenerated through `@BotFather` before further testing.
+
 ## Architecture and responsibilities
 
 ```text
@@ -50,6 +58,8 @@ Each adapter owns its own transport, parsing, and field extraction. It does not 
 
 `NewsArchive` owns the persistence schema and async database operations. `server.py` wires the archive and adapters into the official MCP SDK. It contains no provider parsing or database SQL.
 
+`news_bot` is a separate executable process. Its only news-data boundary is `NewsMcpClient`, which uses `mcp.Client(NEWS_BOT_MCP_URL)` over Streamable HTTP. It obtains no direct Phase 1 database connection and has no provider imports. The command handlers format bounded Telegram messages from MCP article fields and return a generic availability message if MCP cannot be reached.
+
 ## Current folders
 
 ```text
@@ -63,11 +73,17 @@ src/news_mcp/
   models.py             Raw and normalized article contracts
   workflow.py           LangGraph ingestion workflow/service
   server.py             MCP construction and HTTP entry point
+src/news_bot/
+  config.py             Environment-backed Telegram/MCP authorization settings
+  mcp_client.py         Official Streamable HTTP MCP latest-news client
+  app.py                Authorized /start and /news command handlers
+  __main__.py           `python -m news_bot` entry point
 tests/
   test_ingestion.py     Mocked provider ingestion behaviour
   test_archive_queries.py FTS5, ID, date, and digest archive behaviour
   test_mcp_server.py    MCP client discovery behaviour
   test_providers.py     Mocked TechCrunch, Guardian, and Batch configuration behaviour
+  test_news_bot.py      Bot configuration and MCP client-boundary behaviour
 docs/ENGINEERING.md     This technical record
 ```
 
@@ -122,6 +138,8 @@ All tool responses use this envelope:
 
 Tools return an error envelope for invalid source/limit values. The provider error itself is recorded as a failed ingestion attempt instead of being converted into fabricated articles.
 
+For Phase 2 Milestone 1, `/news` calls the existing `get_latest_news(limit=...)` MCP tool. It deliberately returns the persisted archive, not a provider refresh, so it does not claim breaking-news freshness. The returned title, source, publication timestamp, permitted excerpt, and source URL are sent unchanged in meaning to Telegram.
+
 ## Provider details and content policy
 
 MIT News is configured for `https://news.mit.edu/topic/mitartificial-intelligence2-rss.xml`, the artificial-intelligence feed URL linked from MIT's own RSS directory. The adapter parses only feed entries and retains metadata plus the feed-supplied description after HTML is removed and the excerpt is capped at 2,000 characters. It does not crawl article pages.
@@ -163,16 +181,20 @@ The Batch is a weekly newsletter with publicly accessible issue pages, but no do
 | FTS5 token search | Uses SQLite already present in the archive and keeps results grounded in persisted publisher metadata. | A vector database or LLM retrieval layer before either is required. |
 | The Batch fallback chain | Uses structured publisher archive metadata first, then validates Google News redirects, while retaining the subscriber mailbox for deployments where public discovery fails. An explicitly authorized feed still takes precedence. | Issue-page/body scraping or a guessed WordPress feed endpoint. |
 | Duplicate candidates, not auto-merges | Preserves source-specific coverage while surfacing likely same-story links. | Losing provenance by merging editorially distinct records. |
+| Telegram via MCP client only | Preserves independent ownership: Phase 1 owns news and Phase 2 owns interaction. | Importing Phase 1 modules or querying its SQLite directly. |
+| No LangChain/LLM in Phase 2 Milestone 1 | `/news` is deterministic MCP retrieval; adding an agent before natural-language routing would be unused complexity. | Premature agent and model integration. |
 
 ## Dependency record
 
-`pyproject.toml` requires Python 3.11+ and current compatible major ranges for MCP, LangGraph, HTTPX, Feedparser, Pydantic, python-dotenv, and aiosqlite. Development dependencies are pytest and pytest-asyncio. LangChain is intentionally deferred to authorized Phase 2 because this milestone contains no LLM or agent functionality.
+`pyproject.toml` requires Python 3.11+ and current compatible major ranges for MCP, LangGraph, HTTPX, Feedparser, Pydantic, python-dotenv, aiosqlite, and `python-telegram-bot` 22.x. Development dependencies are pytest and pytest-asyncio. LangChain and `langchain-mcp-adapters` are intentionally deferred to Phase 2 Milestone 2 because this milestone contains no LLM or agent functionality.
 
 Official references checked before implementation:
 
 - [MCP Python SDK: running a server](https://py.sdk.modelcontextprotocol.io/run/)
 - [MCP Python SDK: Streamable HTTP ASGI app](https://py.sdk.modelcontextprotocol.io/run/asgi/)
 - [MCP Python SDK v2 migration guide](https://py.sdk.modelcontextprotocol.io/migration/)
+- [MCP Python SDK: client transports](https://py.sdk.modelcontextprotocol.io/client/transports/)
+- [python-telegram-bot ApplicationBuilder v22.8](https://docs.python-telegram-bot.org/en/stable/telegram.ext.applicationbuilder.html)
 - [LangGraph package and documentation](https://pypi.org/project/langgraph/)
 - [LangChain package and documentation](https://pypi.org/project/langchain/)
 
@@ -197,6 +219,9 @@ The tests are designed to use `httpx.MockTransport`, never a live feed:
 - `test_batch_reports_no_new_publication_for_an_empty_google_news_feed`: a blocked archive plus a valid empty Google feed produces a successful zero-article Batch refresh.
 - `test_batch_marks_the_source_failed_when_public_transports_are_unavailable`: failed archive and Google HTTP requests produce a failed Batch attempt without raising out of the workflow.
 - `test_all_phase_one_sources_are_registered_with_configuration_status`: all four source statuses are visible before a live refresh.
+- `test_bot_settings_require_token_and_authorization` and `test_bot_settings_parse_authorized_ids_and_limit`: bot configuration requires a token plus an authorization boundary and validates IDs/limits.
+- `test_news_mcp_client_discovers_and_calls_latest_news`: the Phase 2 client discovers and calls only `get_latest_news` through the MCP client interface.
+- `test_news_mcp_client_hides_connection_details`: MCP connection errors become a user-safe availability error.
 
 **Executed on 2026-10-29:** `python3 -m compileall -q src tests`, a Pydantic-only normalized article/UTC serialization contract probe, and TOML parsing of `pyproject.toml` — all passed. Python reported `3.12.6`; installed global versions were HTTPX `0.28.1` and Pydantic `2.11.10`.
 
@@ -222,6 +247,8 @@ The developer refreshed MIT News, The Guardian, and TechCrunch individually a se
 
 **Final technical review on 2026-10-30:** added focused automated verification for SQLite reopening with source/date filters, populated MCP resources, Guardian HTTP 429, TechCrunch timeout, and malformed non-RSS responses. The malformed-response test found and corrected a bug that had treated HTML without an RSS version as an empty successful feed. The full suite then passed: `.venv/bin/pytest -q` — **21 passed in 0.65s**; `python3 -m compileall -q src tests` and `git diff --check` passed.
 
+**Phase 2 Milestone 1 verification on 2026-10-30:** the initial implementation passed `.venv/bin/pytest -q` — **25 passed in 0.61s**. After adding finite Telegram bootstrap retries for the observed timeout, it passed again — **25 passed in 0.66s**; `python3 -m compileall -q src tests` and `git diff --check` passed. The tests cover the bot configuration and MCP boundary with fakes. Dependency installation could not be completed in the Codex execution environment because DNS prevented pip from fetching build requirements. On the developer's Mac, the installed Telegram process successfully received HTTP 200 from `getMe`, `deleteWebhook`, and `getUpdates`, proving token authentication and polling startup. The developer then verified `get_latest_news(limit=5)` through MCP Inspector against the same server; it returned five persisted MIT News records. An authorized Telegram `/news` command subsequently delivered news, establishing the live Telegram → MCP → SQLite archive → Telegram path. `/start` remains unverified.
+
 ## Known limitations and next milestone
 
 The Guardian key and TechCrunch RSS now have successful macOS live verification. The Batch public archive currently does not expose the required issue JSON-LD metadata, and Google News discovery currently produced no redirect that could be verified as an official issue URL. The optional subscribed IMAP inbox needs the actual sender address and an app password. FTS search is lexical, not semantic, and digest candidates are retrieval results rather than a ranked or LLM-curated digest.
@@ -242,6 +269,8 @@ The Guardian key and TechCrunch RSS now have successful macOS live verification.
 
 **Sign-off decision:** Phase 1 is technically ready for MIT News, The Guardian, and TechCrunch, but it is **not fully signed off against the original four-source requirement**. The remaining Phase 1 decision is whether to configure the optional official Batch subscription mailbox or formally accept the provider as unavailable until DeepLearning.AI exposes a permitted working interface.
 
-## Phase 2 blockers and boundary
+## Phase 2 status, blockers, and boundary
 
-Phase 2 is not authorized and no Phase 2 code exists. Before it can begin, resolve or explicitly accept the partially unmet Batch requirement, choose an always-on deployment with persistent SQLite storage and outbound network access, and provide the future Telegram authorization/scheduling configuration. The Telegram application must remain a separately deployed MCP client using `langchain-mcp-adapters`; it must not import provider adapters or become the MCP server.
+Phase 2 Milestone 1 is authorized and implemented. It contains only Telegram ↔ MCP connectivity: no LangChain/LLM, LangGraph conversation graph, memory, delivery database, digest scheduler, ordinary-text handler, or future commands have been added.
+
+The principal Milestone 1 path, authorized `/news` delivery through MCP, now has live verification. `/start` remains a small pending manual check. Before later Phase 2 milestones, resolve or explicitly accept the partially unmet Batch requirement and choose an always-on deployment with persistent storage and outbound network access. The Telegram application must remain a separately deployed MCP client; it must not import provider adapters, query the Phase 1 database, or become the MCP server.
