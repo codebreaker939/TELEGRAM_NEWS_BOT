@@ -24,6 +24,7 @@ class BotSettings:
     allowed_chat_ids: frozenset[int]
     mcp_server_url: str
     latest_limit: int
+    groq_model: str
 
     @classmethod
     def from_env(cls) -> "BotSettings":
@@ -37,6 +38,11 @@ class BotSettings:
             raise ValueError(
                 "Configure TELEGRAM_ALLOWED_USER_IDS and/or TELEGRAM_ALLOWED_CHAT_IDS"
             )
+        if not os.getenv("GROQ_API_KEY"):
+            raise ValueError("GROQ_API_KEY must be configured")
+        groq_model = os.getenv("GROQ_MODEL")
+        if not groq_model:
+            raise ValueError("GROQ_MODEL must be configured")
         latest_limit = int(os.getenv("NEWS_BOT_LATEST_LIMIT", "5"))
         if not 1 <= latest_limit <= 10:
             raise ValueError("NEWS_BOT_LATEST_LIMIT must be between 1 and 10")
@@ -46,4 +52,5 @@ class BotSettings:
             allowed_chat_ids=allowed_chat_ids,
             mcp_server_url=os.getenv("NEWS_BOT_MCP_URL", "http://127.0.0.1:8000/mcp"),
             latest_limit=latest_limit,
+            groq_model=groq_model,
         )

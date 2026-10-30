@@ -7,8 +7,9 @@ from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
+from news_bot.agent import McpNewsAgent, NewsAssistantUnavailableError
 from news_bot.config import BotSettings
 from news_bot.mcp_client import McpNewsUnavailableError, NewsMcpClient
 
@@ -23,10 +24,20 @@ class LatestNewsClient(Protocol):
 NewsClientFactory = Callable[[str], LatestNewsClient]
 
 
+class NewsAssistant(Protocol):
+    async def answer(self, question: str) -> str: ...
+
+
+NewsAssistantFactory = Callable[[BotSettings], NewsAssistant]
+
+
 class NewsBotHandlers:
-    def __init__(self, settings: BotSettings, news_client: LatestNewsClient) -> None:
+    def __init__(
+        self, settings: BotSettings, news_client: LatestNewsClient, news_assistant: NewsAssistant
+    ) -> None:
         self.settings = settings
         self.news_client = news_client
+        self.news_assistant = news_assistant
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
@@ -59,6 +70,25 @@ class NewsBotHandlers:
             )
             return
         for message in format_latest_news(articles):
+            await self._reply(update, message)
+
+    async def conversation(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        if not await self._authorized(update):
+            return
+        question = update.effective_message.text if update.effective_message else ""
+        if not question:
+            return
+        try:
+            response = await self.news_assistant.answer(question)
+        except NewsAssistantUnavailableError:
+            logger.warning("Could not answer an authorized Telegram news question")
+            await self._reply(
+                update,
+                "The news assistant is temporarily unavailable. Please try again shortly.",
+            )
+            return
+        for message in _split_messages([response]):
             await self._reply(update, message)
 
     async def _authorized(self, update: Update) -> bool:
@@ -115,13 +145,20 @@ def _split_messages(entries: list[str]) -> list[str]:
 
 
 def create_application(
-    settings: BotSettings, news_client_factory: NewsClientFactory = NewsMcpClient
+    settings: BotSettings,
+    news_client_factory: NewsClientFactory = NewsMcpClient,
+    news_assistant_factory: NewsAssistantFactory = McpNewsAgent,
 ) -> Application:
     """Construct handlers without starting the Telegram polling loop."""
-    handlers = NewsBotHandlers(settings, news_client_factory(settings.mcp_server_url))
+    handlers = NewsBotHandlers(
+        settings,
+        news_client_factory(settings.mcp_server_url),
+        news_assistant_factory(settings),
+    )
     application = Application.builder().token(settings.telegram_bot_token).build()
     application.add_handler(CommandHandler("start", handlers.start))
     application.add_handler(CommandHandler("news", handlers.news))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.conversation))
     return application
 
 

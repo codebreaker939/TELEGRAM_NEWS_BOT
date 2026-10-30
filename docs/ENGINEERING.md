@@ -36,6 +36,12 @@ Added the independent `news_bot` package. It exposes only authorized `/start` an
 
 During subsequent developer live startup, Telegram `getMe`, `deleteWebhook`, and polling initialization returned HTTP 200. The initial INFO-level `httpx` log emitted a Bot API URL, which embeds the token; this was treated as credential exposure. `news_bot.app.main()` now suppresses `httpx` and `httpcore` INFO logs. It also sets the official `run_polling(bootstrap_retries=3)` option because the library defaults to zero bootstrap retries; transient `getMe` timeouts now get three retries, while a persistent failure still stops clearly. The token must be revoked and regenerated through `@BotFather` before further testing.
 
+### 2026-10-30 — Phase 2, Milestone 2: grounded LangChain + LangGraph agent
+
+Added `news_bot.agent.McpNewsAgent` for ordinary, authorized Telegram text messages. It creates `ChatGroq` from `GROQ_API_KEY` and `GROQ_MODEL` (`openai/gpt-oss-20b`), opens LangChain's current `MCPAdapter` against the existing Streamable HTTP URL, and discovers the server tools through MCP. A minimal LangGraph `StateGraph` executes `model → ToolNode → model` with a recursion limit of eight steps.
+
+The agent admits only read-only archive tools: `get_latest_news`, `search_news`, `get_article`, `get_related_news`, `get_news_by_date`, `get_digest_candidates`, and `list_sources`. `refresh_news` is intentionally unavailable to prevent a conversational request from silently causing external provider requests. The system prompt requires a tool result before factual news claims, calls the data an archive unless refreshed elsewhere, and requires publisher links and publication dates in its Sources section. As a final guard, when a tool output contains source URLs, the response is rejected unless it includes at least one retrieved URL. The agent retains no messages across requests; persistent context is Milestone 3 work.
+
 ## Architecture and responsibilities
 
 ```text
@@ -58,7 +64,7 @@ Each adapter owns its own transport, parsing, and field extraction. It does not 
 
 `NewsArchive` owns the persistence schema and async database operations. `server.py` wires the archive and adapters into the official MCP SDK. It contains no provider parsing or database SQL.
 
-`news_bot` is a separate executable process. Its only news-data boundary is `NewsMcpClient`, which uses `mcp.Client(NEWS_BOT_MCP_URL)` over Streamable HTTP. It obtains no direct Phase 1 database connection and has no provider imports. The command handlers format bounded Telegram messages from MCP article fields and return a generic availability message if MCP cannot be reached.
+`news_bot` is a separate executable process. Its only news-data boundary is Streamable HTTP MCP. The deterministic `/news` handler uses `NewsMcpClient` and the official MCP SDK. The ordinary-text handler uses `McpNewsAgent`, which discovers LangChain tools through `langchain.mcp.MCPAdapter`. Neither path obtains a direct Phase 1 database connection or imports provider adapters. The command handlers format bounded Telegram messages and return a generic availability message for MCP, Groq API, and graph failures without exposing internal details.
 
 ## Current folders
 
@@ -76,7 +82,8 @@ src/news_mcp/
 src/news_bot/
   config.py             Environment-backed Telegram/MCP authorization settings
   mcp_client.py         Official Streamable HTTP MCP latest-news client
-  app.py                Authorized /start and /news command handlers
+  agent.py              Stateless LangGraph agent and MCPAdapter boundary
+  app.py                Authorized commands and ordinary-text Telegram handler
   __main__.py           `python -m news_bot` entry point
 tests/
   test_ingestion.py     Mocked provider ingestion behaviour
@@ -140,6 +147,8 @@ Tools return an error envelope for invalid source/limit values. The provider err
 
 For Phase 2 Milestone 1, `/news` calls the existing `get_latest_news(limit=...)` MCP tool. It deliberately returns the persisted archive, not a provider refresh, so it does not claim breaking-news freshness. The returned title, source, publication timestamp, permitted excerpt, and source URL are sent unchanged in meaning to Telegram.
 
+For Phase 2 Milestone 2, ordinary Telegram text is supplied as one `HumanMessage` to the stateless graph. The model receives the grounding system prompt and read-only MCP-derived LangChain tools. Tool results are appended by `ToolNode` and supplied to the model for its final answer. The graph ends only when the model emits an answer without tool calls. A recursion limit bounds malformed or repetitive tool-call loops. The bot splits the final answer at Telegram-safe message lengths, but does not persist it or use it in a later request.
+
 ## Provider details and content policy
 
 MIT News is configured for `https://news.mit.edu/topic/mitartificial-intelligence2-rss.xml`, the artificial-intelligence feed URL linked from MIT's own RSS directory. The adapter parses only feed entries and retains metadata plus the feed-supplied description after HTML is removed and the excerpt is capped at 2,000 characters. It does not crawl article pages.
@@ -183,10 +192,14 @@ The Batch is a weekly newsletter with publicly accessible issue pages, but no do
 | Duplicate candidates, not auto-merges | Preserves source-specific coverage while surfacing likely same-story links. | Losing provenance by merging editorially distinct records. |
 | Telegram via MCP client only | Preserves independent ownership: Phase 1 owns news and Phase 2 owns interaction. | Importing Phase 1 modules or querying its SQLite directly. |
 | No LangChain/LLM in Phase 2 Milestone 1 | `/news` is deterministic MCP retrieval; adding an agent before natural-language routing would be unused complexity. | Premature agent and model integration. |
+| `langchain[mcp]` `MCPAdapter` | The current LangChain MCP documentation recommends it; it connects URL targets using Streamable HTTP and discovers tools for LangChain. | Archived `langchain-mcp-adapters`, which current documentation says to migrate away from. |
+| `ChatGroq` with `openai/gpt-oss-20b` | Explicit user-selected provider/model; Groq documents local function calling for this model. | Assuming a different provider or model. |
+| Read-only tools in Milestone 2 | Prevents an ordinary conversation from triggering provider refreshes, while still serving archive and historical queries. | Letting the LLM call `refresh_news` implicitly. |
+| Stateless graph | Delivers grounded current/archive requests without prematurely implementing the separate persistent-memory design. | In-memory or SQLite checkpointing before Milestone 3 authorization. |
 
 ## Dependency record
 
-`pyproject.toml` requires Python 3.11+ and current compatible major ranges for MCP, LangGraph, HTTPX, Feedparser, Pydantic, python-dotenv, aiosqlite, and `python-telegram-bot` 22.x. Development dependencies are pytest and pytest-asyncio. LangChain and `langchain-mcp-adapters` are intentionally deferred to Phase 2 Milestone 2 because this milestone contains no LLM or agent functionality.
+`pyproject.toml` requires Python 3.11+ and current compatible major ranges for MCP, LangGraph, HTTPX, Feedparser, Pydantic, python-dotenv, aiosqlite, and `python-telegram-bot` 22.x. Milestone 2 adds `langchain[mcp]>=1.4.7,<2` and `langchain-groq>=1.1.3,<2`; the latter's current package metadata requires `langchain-core>=1.4.7,<2`. Development dependencies are pytest and pytest-asyncio. `GROQ_API_KEY` and `GROQ_MODEL` are required runtime configuration and are never committed.
 
 Official references checked before implementation:
 
@@ -196,7 +209,10 @@ Official references checked before implementation:
 - [MCP Python SDK: client transports](https://py.sdk.modelcontextprotocol.io/client/transports/)
 - [python-telegram-bot ApplicationBuilder v22.8](https://docs.python-telegram-bot.org/en/stable/telegram.ext.applicationbuilder.html)
 - [LangGraph package and documentation](https://pypi.org/project/langgraph/)
-- [LangChain package and documentation](https://pypi.org/project/langchain/)
+- [LangChain MCPAdapter](https://docs.langchain.com/oss/python/langchain/mcp)
+- [ChatGroq reference](https://reference.langchain.com/python/langchain-groq/chat_models/ChatGroq)
+- [Groq GPT-OSS 20B model capability](https://console.groq.com/docs/model/openai/gpt-oss-20b)
+- [Groq local tool calling](https://console.groq.com/docs/tool-use/local-tool-calling)
 
 ## Testing strategy and verified results
 
@@ -222,6 +238,8 @@ The tests are designed to use `httpx.MockTransport`, never a live feed:
 - `test_bot_settings_require_token_and_authorization` and `test_bot_settings_parse_authorized_ids_and_limit`: bot configuration requires a token plus an authorization boundary and validates IDs/limits.
 - `test_news_mcp_client_discovers_and_calls_latest_news`: the Phase 2 client discovers and calls only `get_latest_news` through the MCP client interface.
 - `test_news_mcp_client_hides_connection_details`: MCP connection errors become a user-safe availability error.
+- `test_telegram_conversation_runs_langgraph_agent_with_mcp_tools`: mocked authorized Telegram text traverses `McpNewsAgent`, the LangGraph model/tool loop, an MCPAdapter-shaped tool source, and a grounded response containing the returned publisher URL. The test proves that `/news`'s direct MCP client is not used by the conversational path.
+- `test_agent_hides_model_and_mcp_failures`: mocked Groq rate-limit and MCP connection failures become one user-safe agent availability error.
 
 **Executed on 2026-10-29:** `python3 -m compileall -q src tests`, a Pydantic-only normalized article/UTC serialization contract probe, and TOML parsing of `pyproject.toml` — all passed. Python reported `3.12.6`; installed global versions were HTTPX `0.28.1` and Pydantic `2.11.10`.
 
@@ -247,7 +265,9 @@ The developer refreshed MIT News, The Guardian, and TechCrunch individually a se
 
 **Final technical review on 2026-10-30:** added focused automated verification for SQLite reopening with source/date filters, populated MCP resources, Guardian HTTP 429, TechCrunch timeout, and malformed non-RSS responses. The malformed-response test found and corrected a bug that had treated HTML without an RSS version as an empty successful feed. The full suite then passed: `.venv/bin/pytest -q` — **21 passed in 0.65s**; `python3 -m compileall -q src tests` and `git diff --check` passed.
 
-**Phase 2 Milestone 1 verification on 2026-10-30:** the initial implementation passed `.venv/bin/pytest -q` — **25 passed in 0.61s**. After adding finite Telegram bootstrap retries for the observed timeout, it passed again — **25 passed in 0.66s**; `python3 -m compileall -q src tests` and `git diff --check` passed. The tests cover the bot configuration and MCP boundary with fakes. Dependency installation could not be completed in the Codex execution environment because DNS prevented pip from fetching build requirements. On the developer's Mac, the installed Telegram process successfully received HTTP 200 from `getMe`, `deleteWebhook`, and `getUpdates`, proving token authentication and polling startup. The developer then verified `get_latest_news(limit=5)` through MCP Inspector against the same server; it returned five persisted MIT News records. An authorized Telegram `/news` command subsequently delivered news, establishing the live Telegram → MCP → SQLite archive → Telegram path. `/start` remains unverified.
+**Phase 2 Milestone 1 verification on 2026-10-30:** the initial implementation passed `.venv/bin/pytest -q` — **25 passed in 0.61s**. After adding finite Telegram bootstrap retries for the observed timeout, it passed again — **25 passed in 0.66s**; `python3 -m compileall -q src tests` and `git diff --check` passed. The tests cover the bot configuration and MCP boundary with fakes. Dependency installation could not be completed in the Codex execution environment because DNS prevented pip from fetching build requirements. On the developer's Mac, the installed Telegram process successfully received HTTP 200 from `getMe`, `deleteWebhook`, and `getUpdates`, proving token authentication and polling startup. The developer then verified `get_latest_news(limit=5)` through MCP Inspector against the same server; it returned five persisted MIT News records. Authorized Telegram `/news` delivery subsequently established the live Telegram → MCP → SQLite archive → Telegram path, and `/start` was also manually live-verified.
+
+**Phase 2 Milestone 2 verification on 2026-10-30:** `.venv/bin/pytest -q` first passed **26 tests in 1.57s**, passed again in **1.24s**, and completed after model/MCP-failure coverage — **28 passed in 0.92s** and later **0.77s**; `python3 -m compileall -q src tests` and `git diff --check` passed. The mocked end-to-end test exercises Telegram message handling, LangGraph routing, a model tool call, a `ToolNode` invocation, and a publisher URL in the response. The failure coverage checks safe handling of a simulated Groq rate limit and an unavailable MCP server. These tests do not make a Groq request or connect to the live MCP HTTP endpoint. An attempted `.venv/bin/python -m pip install -e '.[dev]'` failed before dependency resolution because this execution environment could not resolve PyPI's `setuptools` endpoint (`nodename nor servname provided`). Therefore `langchain`, `langchain-groq`, and the `langchain[mcp]` extra were not import-verified here, and live Groq function calling remains pending a network-enabled local run with a valid `GROQ_API_KEY`.
 
 ## Known limitations and next milestone
 
@@ -271,6 +291,6 @@ The Guardian key and TechCrunch RSS now have successful macOS live verification.
 
 ## Phase 2 status, blockers, and boundary
 
-Phase 2 Milestone 1 is authorized and implemented. It contains only Telegram ↔ MCP connectivity: no LangChain/LLM, LangGraph conversation graph, memory, delivery database, digest scheduler, ordinary-text handler, or future commands have been added.
+Phase 2 Milestones 1 and 2 are authorized and implemented. Milestone 1 has live verification for startup, authorization, `/start`, and `/news` delivery through MCP. Milestone 2 adds the stateless LangChain/LangGraph agent and has mocked full-path verification only; live Groq function-calling verification remains pending dependency installation, a local `GROQ_API_KEY`, and a running MCP server.
 
-The principal Milestone 1 path, authorized `/news` delivery through MCP, now has live verification. `/start` remains a small pending manual check. Before later Phase 2 milestones, resolve or explicitly accept the partially unmet Batch requirement and choose an always-on deployment with persistent storage and outbound network access. The Telegram application must remain a separately deployed MCP client; it must not import provider adapters, query the Phase 1 database, or become the MCP server.
+Milestone 3 has not started: no persistent conversation memory, SQLite delivery records, follow-up-resolution logic, or inline-question buttons exist. Milestone 4 has not started: no digest scheduler or 6 AM IST automation exists. Before later milestones, resolve or explicitly accept the partially unmet Batch requirement and choose an always-on deployment with persistent storage and outbound network access. The Telegram application must remain a separately deployed MCP client; it must not import provider adapters, query the Phase 1 database, or become the MCP server.
